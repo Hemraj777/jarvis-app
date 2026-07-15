@@ -23,17 +23,11 @@ jobs:
           gradle-version: 8.2
           cache-disabled: true
 
-      - name: Build APK
-        run: gradle assembleRelease
-
-      - name: Find APK
-        run: |
-          echo "Looking for APK..."
-          find app/build -name "*.apk" 2>/dev/null || echo "No APK found"
-          ls -la app/build/outputs/apk/release/ 2>/dev/null || echo "No release dir"
+      - name: Build Debug APK (signed)
+        run: gradle assembleDebug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: jarvis-apk
-          path: app/build/outputs/apk/release/*.apk
+          path: app/build/outputs/apk/debug/*.apk
