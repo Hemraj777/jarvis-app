@@ -37,5 +37,5 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("androidx.webkit:webkit:1.9.0")
     implementation("androidx.activity:activity-ktx:1.8.2")
-    compileOnly("androidx.annotation:annotation:1.7.0")
+
 }
