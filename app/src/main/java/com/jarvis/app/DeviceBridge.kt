@@ -8,7 +8,7 @@ import android.net.wifi.WifiManager
 import android.provider.Settings
 import android.app.NotificationManager
 import android.util.Log
-import moe.shizuku.api.Shizuku
+import java.lang.reflect.Method
 
 class DeviceBridge(private val context: Context) {
 
@@ -105,9 +105,18 @@ class DeviceBridge(private val context: Context) {
     }
 
     private fun shizukuRun(cmd: String): Boolean {
-        if (!Shizuku.pingBinder()) return false
-        val process = Shizuku.newProcess(arrayOf("sh", "-c", cmd), null, null)
-        val exit = process.waitFor()
-        return exit == 0
+        try {
+            val clz = Class.forName("moe.shizuku.api.Shizuku")
+            val ping = clz.getMethod("pingBinder")
+            if (ping.invoke(null) as? Boolean != true) return false
+
+            val newProcess = clz.getMethod("newProcess", Array<String>::class.java, String::class.java, String::class.java)
+            val process = newProcess.invoke(null, arrayOf("sh", "-c", cmd), null, null) as Process
+            val exit = process.waitFor()
+            return exit == 0
+        } catch (e: Exception) {
+            Log.w("DeviceBridge", "Shizuku not available", e)
+            return false
+        }
     }
 }

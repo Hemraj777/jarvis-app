@@ -9,10 +9,8 @@ import android.provider.Settings
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.NotificationManagerCompat
-import moe.shizuku.api.Shizuku
 
 class MainActivity : AppCompatActivity() {
 
@@ -20,7 +18,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var bridge: DeviceBridge
 
     companion object {
-        private const val REQ_SHIZUKU = 1001
         private const val REQ_WRITE_SETTINGS = 1002
         private const val REQ_NOTIFICATION_POLICY = 1003
     }
@@ -84,12 +81,6 @@ class MainActivity : AppCompatActivity() {
                 Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS),
                 REQ_NOTIFICATION_POLICY
             )
-        }
-
-        if (Shizuku.pingBinder()) {
-            try {
-                Shizuku.requestPermission(REQ_SHIZUKU)
-            } catch (_: Exception) {}
         }
     }
 
