@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">J.A.R.V.I.S.</string>
+    <!-- CHANGE THIS to your actual deployed URL -->
+    <string name="jarvis_url">https://jarvis-muhb.vercel.app</string>
+</resources>
