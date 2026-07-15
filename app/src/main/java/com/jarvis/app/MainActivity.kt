@@ -5,12 +5,12 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.app.NotificationManager
 import android.provider.Settings
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.app.NotificationManagerCompat
 
 class MainActivity : AppCompatActivity() {
 
@@ -76,7 +76,8 @@ class MainActivity : AppCompatActivity() {
             )
         }
 
-        if (!NotificationManagerCompat.from(this).isNotificationPolicyAccessGranted) {
+        val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+        if (!nm.isNotificationPolicyAccessGranted) {
             startActivityForResult(
                 Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS),
                 REQ_NOTIFICATION_POLICY
