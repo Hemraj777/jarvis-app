@@ -3,6 +3,7 @@ package com.jarvis.app
 import android.Manifest
 import android.content.Intent
 import android.net.Uri
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.app.NotificationManager
@@ -82,6 +83,10 @@ class MainActivity : AppCompatActivity() {
                 Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS),
                 REQ_NOTIFICATION_POLICY
             )
+        }
+
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 0)
         }
     }
 
