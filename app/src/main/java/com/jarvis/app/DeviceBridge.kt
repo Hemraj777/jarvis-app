@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioManager
+import android.media.MediaPlayer
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
@@ -16,6 +17,9 @@ import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.util.Log
+import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
 
 class DeviceBridge(private val context: Context) {
 
@@ -24,40 +28,31 @@ class DeviceBridge(private val context: Context) {
     private var recognitionResult = ""
     private var recognitionActive = false
 
-    private val appPkg = mapOf(
-        "whatsapp"  to "com.whatsapp",
-        "youtube"   to "com.google.android.youtube",
-        "chrome"    to "com.android.chrome",
-        "gmail"     to "com.google.android.gm",
-        "maps"      to "com.google.android.apps.maps",
-        "instagram" to "com.instagram.android",
-        "spotube"   to "com.bervan.spotube",
-        "telegram"  to "org.telegram.messenger",
-        "twitter"   to "com.twitter.android",
-        "facebook"  to "com.facebook.katana",
-        "snapchat"  to "com.snapchat.android",
-        "tiktok"    to "com.zhiliaoapp.musically",
-        "reddit"    to "com.reddit.frontpage",
-        "linkedin"  to "com.linkedin.android",
-        "netflix"   to "com.netflix.mediaclient",
-        "spotify"   to "com.spotify.music",
-        "camera"    to "com.google.android.GoogleCamera",
-        "settings"  to "com.android.settings",
-        "calculator" to "com.android.calculator2",
-        "phone"     to "com.android.dialer",
-        "contacts"  to "com.android.contacts",
-        "messenger" to "com.facebook.orca",
-        "discord"   to "com.discord",
-        "github"    to "com.github.android",
-        "play store" to "com.android.vending",
-        "files"     to "com.android.documentsui",
-        "clock"     to "com.google.android.deskclock"
-    )
+    private val appMap = mutableMapOf<String, String>()
 
     init {
         try {
             tts = TextToSpeech(context) { status ->
                 if (status != TextToSpeech.SUCCESS) tts = null
+            }
+        } catch (_: Exception) {}
+        scanInstalledApps()
+    }
+
+    private fun scanInstalledApps() {
+        try {
+            val pm = context.packageManager
+            val mainIntent = Intent(Intent.ACTION_MAIN).apply { addCategory(Intent.CATEGORY_LAUNCHER) }
+            val activities = pm.queryIntentActivities(mainIntent, 0)
+            for (ri in activities) {
+                val label = ri.loadLabel(pm).toString().trim()
+                val pkg = ri.activityInfo.packageName
+                // Map by lowercase app name
+                val clean = label.replace(Regex("[^a-zA-Z0-9 ]"), "").lowercase().trim()
+                if (clean.length >= 2 && clean !in appMap) appMap[clean] = pkg
+                // Also map by last part of package name (e.g. "chrome" for "com.android.chrome")
+                val short = pkg.split(".").lastOrNull()?.lowercase() ?: continue
+                if (short.length >= 2 && short !in appMap) appMap[short] = pkg
             }
         } catch (_: Exception) {}
     }
@@ -85,17 +80,24 @@ class DeviceBridge(private val context: Context) {
                 else -> "error:unknown action"
             }
         } catch (e: SecurityException) {
-            "error:permission denied - ${e.message?.take(80)}"
+            "error:permission denied — ${e.message?.take(80)}"
         } catch (e: Exception) {
             "error:${e.message?.take(80) ?: "unknown"}"
         }
     }
 
-    // ===== TEXT-TO-SPEECH =====
+    // ===== TEXT-TO-SPEECH (native + ElevenLabs) =====
 
     @android.webkit.JavascriptInterface
-    fun speak(text: String) {
-        try { tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, null) } catch (_: Exception) {}
+    fun speak(text: String, elevenLabsKey: String?) {
+        try {
+            tts?.stop()
+            if (!elevenLabsKey.isNullOrBlank()) {
+                speakElevenLabs(text, elevenLabsKey)
+            } else {
+                tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, null)
+            }
+        } catch (_: Exception) {}
     }
 
     @android.webkit.JavascriptInterface
@@ -105,6 +107,46 @@ class DeviceBridge(private val context: Context) {
 
     @android.webkit.JavascriptInterface
     fun isTtsSpeaking(): Boolean = try { tts?.isSpeaking == true } catch (_: Exception) { false }
+
+    private fun speakElevenLabs(text: String, apiKey: String) {
+        Thread {
+            try {
+                val voiceId = "21m00Tcm4TlvDq8ikWAM" // Rachel
+                val url = URL("https://api.elevenlabs.io/v1/text-to-speech/$voiceId")
+                val conn = url.openConnection() as HttpURLConnection
+                conn.requestMethod = "POST"
+                conn.setRequestProperty("Content-Type", "application/json")
+                conn.setRequestProperty("xi-api-key", apiKey)
+                conn.doOutput = true
+
+                val body = """{"text":${jsonEscape(text)},"model_id":"eleven_monolingual_v1","voice_settings":{"stability":0.5,"similarity_boost":0.75}}"""
+                conn.outputStream.write(body.toByteArray())
+
+                if (conn.responseCode != 200) {
+                    // Fallback to native TTS
+                    tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, null)
+                    return@Thread
+                }
+
+                val audioData = conn.inputStream.readBytes()
+                val tempFile = File(context.cacheDir, "jarvis_voice.mp3")
+                tempFile.writeBytes(audioData)
+
+                val mp = MediaPlayer()
+                mp.setDataSource(tempFile.absolutePath)
+                mp.prepare()
+                mp.start()
+                mp.setOnCompletionListener { mp.release(); tempFile.delete() }
+            } catch (_: Exception) {
+                // Fallback
+                try { tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, null) } catch (_: Exception) {}
+            }
+        }.start()
+    }
+
+    private fun jsonEscape(s: String): String {
+        return s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+    }
 
     // ===== SPEECH RECOGNITION =====
 
@@ -127,7 +169,10 @@ class DeviceBridge(private val context: Context) {
                     recognitionResult = matches?.firstOrNull() ?: ""
                     recognitionActive = false
                 }
-                override fun onError(error: Int) { recognitionActive = false; recognitionResult = "" }
+                override fun onError(error: Int) {
+                    recognitionActive = false
+                    // Only clear result if we had nothing
+                }
                 override fun onReadyForSpeech(p: Bundle?) {}
                 override fun onBeginningOfSpeech() {}
                 override fun onRmsChanged(v: Float) {}
@@ -160,12 +205,16 @@ class DeviceBridge(private val context: Context) {
 
     @android.webkit.JavascriptInterface
     fun stopListening() {
-        try {
-            speech?.stopListening()
-            speech?.destroy()
-        } catch (_: Exception) {}
+        try { speech?.stopListening(); speech?.destroy() } catch (_: Exception) {}
         speech = null
         recognitionActive = false
+    }
+
+    @android.webkit.JavascriptInterface
+    fun getInstalledApps(): String {
+        return try {
+            appMap.keys.joinToString(",")
+        } catch (_: Exception) { "" }
     }
 
     // ===== PRIVATE HELPERS =====
@@ -184,7 +233,6 @@ class DeviceBridge(private val context: Context) {
         if (ba == null) return "error:no Bluetooth hardware"
         val ok = if (on) ba.enable() else ba.disable()
         if (ok) return "ok"
-        // fallback: open Bluetooth settings
         try {
             val i = Intent(Settings.ACTION_BLUETOOTH_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             context.startActivity(i)
@@ -229,9 +277,12 @@ class DeviceBridge(private val context: Context) {
     }
 
     private fun openApp(name: String): String {
-        val pkg = appPkg[name] ?: return "error:unknown app '$name'"
+        val query = name.lowercase().trim()
+        // Try exact match first, then contains
+        val pkg = appMap[query] ?: appMap.entries.find { query in it.key || it.key in query }?.value
+            ?: return "error:app '$name' not found on your device"
         val intent = context.packageManager.getLaunchIntentForPackage(pkg)
-        if (intent == null) return "error:app '$name' not installed"
+        if (intent == null) return "error:app '$name' is installed but cannot be launched"
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         context.startActivity(intent)
         return "ok"
