@@ -9,9 +9,13 @@ import android.provider.Settings
 import android.app.NotificationManager
 import android.content.pm.PackageManager
 import android.os.Build
+import android.speech.tts.TextToSpeech
 import android.util.Log
+import java.util.Locale
 
 class DeviceBridge(private val context: Context) {
+
+    private var tts: TextToSpeech? = null
 
     private val appPkg = mapOf(
         "whatsapp"  to "com.whatsapp",
@@ -22,6 +26,16 @@ class DeviceBridge(private val context: Context) {
         "instagram" to "com.instagram.android",
         "spotube"   to "com.bervan.spotube"
     )
+
+    init {
+        try {
+            tts = TextToSpeech(context) { status ->
+                if (status != TextToSpeech.SUCCESS) {
+                    tts = null
+                }
+            }
+        } catch (_: Exception) {}
+    }
 
     @android.webkit.JavascriptInterface
     fun execute(action: String): String {
@@ -56,6 +70,29 @@ class DeviceBridge(private val context: Context) {
         } catch (e: Exception) {
             Log.e("DeviceBridge", "execute error", e)
             "error:${e.message?.take(80) ?: "unknown"}"
+        }
+    }
+
+    @android.webkit.JavascriptInterface
+    fun speak(text: String) {
+        try {
+            tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, null)
+        } catch (_: Exception) {}
+    }
+
+    @android.webkit.JavascriptInterface
+    fun stopSpeaking() {
+        try {
+            tts?.stop()
+        } catch (_: Exception) {}
+    }
+
+    @android.webkit.JavascriptInterface
+    fun isSpeaking(): Boolean {
+        return try {
+            tts?.isSpeaking == true
+        } catch (_: Exception) {
+            false
         }
     }
 
