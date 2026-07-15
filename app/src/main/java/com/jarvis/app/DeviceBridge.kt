@@ -20,6 +20,9 @@ import android.util.Log
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.Locale
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 class DeviceBridge(private val context: Context) {
 
@@ -27,15 +30,24 @@ class DeviceBridge(private val context: Context) {
     private var speech: SpeechRecognizer? = null
     private var recognitionResult = ""
     private var recognitionActive = false
-
     private val appMap = mutableMapOf<String, String>()
 
     init {
+        // Blocking TTS init — guarantees it's ready when speak() is called
+        val latch = CountDownLatch(1)
         try {
             tts = TextToSpeech(context) { status ->
                 if (status != TextToSpeech.SUCCESS) tts = null
+                latch.countDown()
             }
+            latch.await(2, TimeUnit.SECONDS)
         } catch (_: Exception) {}
+
+        // Always create a fallback TTS if init failed
+        if (tts == null) {
+            try { tts = TextToSpeech(context) { _ -> } } catch (_: Exception) {}
+        }
+
         scanInstalledApps()
     }
 
@@ -47,17 +59,16 @@ class DeviceBridge(private val context: Context) {
             for (ri in activities) {
                 val label = ri.loadLabel(pm).toString().trim()
                 val pkg = ri.activityInfo.packageName
-                // Map by lowercase app name
-                val clean = label.replace(Regex("[^a-zA-Z0-9 ]"), "").lowercase().trim()
-                if (clean.length >= 2 && clean !in appMap) appMap[clean] = pkg
-                // Also map by last part of package name (e.g. "chrome" for "com.android.chrome")
+                val clean = label.lowercase().replace(Regex("[^a-z0-9 ]"), "").trim()
+                if (clean.length >= 2) appMap[clean] = pkg
                 val short = pkg.split(".").lastOrNull()?.lowercase() ?: continue
-                if (short.length >= 2 && short !in appMap) appMap[short] = pkg
+                if (short.length >= 2) appMap[short] = pkg
             }
         } catch (_: Exception) {}
     }
 
-    // ===== DEVICE CONTROL =====
+    @android.webkit.JavascriptInterface
+    fun ping(): Boolean = true
 
     @android.webkit.JavascriptInterface
     fun execute(action: String): String {
@@ -74,29 +85,37 @@ class DeviceBridge(private val context: Context) {
                 action == "screenshot" -> shizukuRun("screencap -p /sdcard/Pictures/jarvis_screenshot.png")
                 action.startsWith("brightness_set:") -> {
                     val v = action.substringAfter(":").toIntOrNull()
-                    if (v == null) "error:invalid brightness value" else setBrightness(v)
+                    if (v == null) "error:bad value" else setBrightness(v)
                 }
                 action.startsWith("open_") -> openApp(action.removePrefix("open_"))
                 else -> "error:unknown action"
             }
         } catch (e: SecurityException) {
-            "error:permission denied — ${e.message?.take(80)}"
+            "error:perm denied — ${e.message?.take(60)}"
         } catch (e: Exception) {
-            "error:${e.message?.take(80) ?: "unknown"}"
+            "error:${e.message?.take(60) ?: "unknown"}"
         }
     }
 
-    // ===== TEXT-TO-SPEECH (native + ElevenLabs) =====
+    // ===== TTS =====
 
     @android.webkit.JavascriptInterface
-    fun speak(text: String, elevenLabsKey: String?) {
+    fun speak(text: String) {
+        speakWithKey(text, "")
+    }
+
+    @android.webkit.JavascriptInterface
+    fun speakWithKey(text: String, elevenLabsKey: String) {
         try {
             tts?.stop()
-            if (!elevenLabsKey.isNullOrBlank()) {
-                speakElevenLabs(text, elevenLabsKey)
-            } else {
-                tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, null)
-            }
+        } catch (_: Exception) {}
+
+        if (elevenLabsKey.isNotBlank()) {
+            speakElevenLabs(text, elevenLabsKey)
+            return
+        }
+        try {
+            tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, null)
         } catch (_: Exception) {}
     }
 
@@ -111,42 +130,35 @@ class DeviceBridge(private val context: Context) {
     private fun speakElevenLabs(text: String, apiKey: String) {
         Thread {
             try {
-                val voiceId = "21m00Tcm4TlvDq8ikWAM" // Rachel
+                val voiceId = "21m00Tcm4TlvDq8ikWAM"
                 val url = URL("https://api.elevenlabs.io/v1/text-to-speech/$voiceId")
                 val conn = url.openConnection() as HttpURLConnection
                 conn.requestMethod = "POST"
                 conn.setRequestProperty("Content-Type", "application/json")
                 conn.setRequestProperty("xi-api-key", apiKey)
                 conn.doOutput = true
-
-                val body = """{"text":${jsonEscape(text)},"model_id":"eleven_monolingual_v1","voice_settings":{"stability":0.5,"similarity_boost":0.75}}"""
+                val body = """{"text":${jsonEsc(text)},"model_id":"eleven_monolingual_v1","voice_settings":{"stability":0.5,"similarity_boost":0.75}}"""
                 conn.outputStream.write(body.toByteArray())
-
                 if (conn.responseCode != 200) {
-                    // Fallback to native TTS
                     tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, null)
                     return@Thread
                 }
-
-                val audioData = conn.inputStream.readBytes()
-                val tempFile = File(context.cacheDir, "jarvis_voice.mp3")
-                tempFile.writeBytes(audioData)
-
+                val audio = conn.inputStream.readBytes()
+                val f = File(context.cacheDir, "jv.mp3")
+                f.writeBytes(audio)
                 val mp = MediaPlayer()
-                mp.setDataSource(tempFile.absolutePath)
+                mp.setDataSource(f.absolutePath)
                 mp.prepare()
                 mp.start()
-                mp.setOnCompletionListener { mp.release(); tempFile.delete() }
+                mp.setOnCompletionListener { mp.release(); f.delete() }
             } catch (_: Exception) {
-                // Fallback
                 try { tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, null) } catch (_: Exception) {}
             }
         }.start()
     }
 
-    private fun jsonEscape(s: String): String {
-        return s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
-    }
+    private fun jsonEsc(s: String) = "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"")
+        .replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t") + "\""
 
     // ===== SPEECH RECOGNITION =====
 
@@ -154,44 +166,40 @@ class DeviceBridge(private val context: Context) {
     fun startListening(): Boolean {
         if (recognitionActive) return false
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            val hasPerm = context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-            if (!hasPerm) return false
+            if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                return false
+            }
         }
         try {
             speech?.destroy()
-            val recognizer = SpeechRecognizer.createSpeechRecognizer(context)
-            speech = recognizer
+            val r = SpeechRecognizer.createSpeechRecognizer(context) ?: return false
+            speech = r
             recognitionResult = ""
             recognitionActive = true
-            recognizer.setRecognitionListener(object : RecognitionListener {
-                override fun onResults(results: Bundle) {
-                    val matches = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    recognitionResult = matches?.firstOrNull() ?: ""
+            r.setRecognitionListener(object : RecognitionListener {
+                override fun onResults(b: Bundle) {
+                    val m = b.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    recognitionResult = m?.firstOrNull() ?: ""
                     recognitionActive = false
                 }
-                override fun onError(error: Int) {
-                    recognitionActive = false
-                    // Only clear result if we had nothing
-                }
+                override fun onError(e: Int) { recognitionActive = false }
                 override fun onReadyForSpeech(p: Bundle?) {}
                 override fun onBeginningOfSpeech() {}
                 override fun onRmsChanged(v: Float) {}
                 override fun onBufferReceived(b: ByteArray?) {}
                 override fun onEndOfSpeech() {}
                 override fun onPartialResults(p: Bundle?) {
-                    val matches = p?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    if (!matches.isNullOrEmpty()) recognitionResult = matches[0]
+                    val m = p?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    if (!m.isNullOrEmpty()) recognitionResult = m[0]
                 }
                 override fun onEvent(t: Int, b: Bundle?) {}
             })
-            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            r.startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                 putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            }
-            recognizer.startListening(intent)
+            })
             return true
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             recognitionActive = false
             return false
         }
@@ -206,98 +214,75 @@ class DeviceBridge(private val context: Context) {
     @android.webkit.JavascriptInterface
     fun stopListening() {
         try { speech?.stopListening(); speech?.destroy() } catch (_: Exception) {}
-        speech = null
-        recognitionActive = false
+        speech = null; recognitionActive = false
     }
 
     @android.webkit.JavascriptInterface
-    fun getInstalledApps(): String {
-        return try {
-            appMap.keys.joinToString(",")
-        } catch (_: Exception) { "" }
-    }
+    fun getInstalledApps(): String = appMap.keys.joinToString(",")
 
-    // ===== PRIVATE HELPERS =====
+    // ===== PRIVATE =====
 
     private fun setWifi(on: Boolean): String {
         val wm = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-        return if (wm.setWifiEnabled(on)) "ok" else "error:failed to toggle WiFi"
+        return if (wm.setWifiEnabled(on)) "ok" else "error:failed"
     }
 
     private fun setBluetooth(on: Boolean): String {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            val hasPerm = context.checkSelfPermission(android.Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
-            if (!hasPerm) return "error:grant Nearby devices permission in Settings"
+            if (context.checkSelfPermission(android.Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED)
+                return "error:grant Nearby devices permission"
         }
-        val ba = BluetoothAdapter.getDefaultAdapter()
-        if (ba == null) return "error:no Bluetooth hardware"
-        val ok = if (on) ba.enable() else ba.disable()
-        if (ok) return "ok"
+        val ba = BluetoothAdapter.getDefaultAdapter() ?: return "error:no BT"
+        if (if (on) ba.enable() else ba.disable()) return "ok"
         try {
-            val i = Intent(Settings.ACTION_BLUETOOTH_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            context.startActivity(i)
-            return "error:opened Bluetooth settings — toggle it manually"
-        } catch (_: Exception) {
-            return "error:Bluetooth toggle failed"
-        }
+            context.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            return "error:opened BT settings"
+        } catch (_: Exception) { return "error:BT toggle failed" }
     }
 
-    private fun adjustVolume(action: String): String {
+    private fun adjustVolume(a: String): String {
         val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        val dir = when (action) {
-            "vol_up" -> AudioManager.ADJUST_RAISE
-            "vol_down" -> AudioManager.ADJUST_LOWER
-            "vol_mute" -> AudioManager.ADJUST_MUTE
-            else -> return "error:unknown volume action"
-        }
-        am.adjustStreamVolume(AudioManager.STREAM_MUSIC, dir, 0)
+        am.adjustStreamVolume(AudioManager.STREAM_MUSIC,
+            when (a) { "vol_up" -> AudioManager.ADJUST_RAISE; "vol_down" -> AudioManager.ADJUST_LOWER
+                "vol_mute" -> AudioManager.ADJUST_MUTE; else -> return "error:bad" }, 0)
         return "ok"
     }
 
     private fun setDnd(on: Boolean): String {
         val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        if (!nm.isNotificationPolicyAccessGranted) return "error:grant DND access in Settings"
-        nm.setInterruptionFilter(
-            if (on) NotificationManager.INTERRUPTION_FILTER_PRIORITY
-            else NotificationManager.INTERRUPTION_FILTER_ALL
-        )
+        if (!nm.isNotificationPolicyAccessGranted) return "error:grant DND access"
+        nm.setInterruptionFilter(if (on) NotificationManager.INTERRUPTION_FILTER_PRIORITY else NotificationManager.INTERRUPTION_FILTER_ALL)
         return "ok"
     }
 
-    private fun setBrightness(value: Int): String {
-        Settings.System.putInt(context.contentResolver, Settings.System.SCREEN_BRIGHTNESS, value.coerceIn(0, 255))
+    private fun setBrightness(v: Int): String {
+        Settings.System.putInt(context.contentResolver, Settings.System.SCREEN_BRIGHTNESS, v.coerceIn(0, 255))
         return "ok"
     }
 
     private fun setBrightnessAuto(on: Boolean): String {
         Settings.System.putInt(context.contentResolver, Settings.System.SCREEN_BRIGHTNESS_MODE,
-            if (on) Settings.System.SCREEN_BRIGHTNESS_MODE_AUTOMATIC
-            else Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL)
+            if (on) Settings.System.SCREEN_BRIGHTNESS_MODE_AUTOMATIC else Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL)
         return "ok"
     }
 
     private fun openApp(name: String): String {
-        val query = name.lowercase().trim()
-        // Try exact match first, then contains
-        val pkg = appMap[query] ?: appMap.entries.find { query in it.key || it.key in query }?.value
-            ?: return "error:app '$name' not found on your device"
-        val intent = context.packageManager.getLaunchIntentForPackage(pkg)
-        if (intent == null) return "error:app '$name' is installed but cannot be launched"
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        context.startActivity(intent)
+        val q = name.lowercase().trim()
+        val pkg = appMap[q] ?: appMap.entries.find { q in it.key || it.key in q }?.value ?: return "error:app '$name' not found"
+        val i = context.packageManager.getLaunchIntentForPackage(pkg) ?: return "error:app '$name' cannot launch"
+        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        context.startActivity(i)
         return "ok"
     }
 
     private fun shizukuRun(cmd: String): String {
         try {
-            val clz = Class.forName("moe.shizuku.api.Shizuku")
-            val ping = clz.getMethod("pingBinder")
-            if (ping.invoke(null) as? Boolean != true) return "error:install Shizuku app for this feature"
-            val newProcess = clz.getMethod("newProcess", Array<String>::class.java, String::class.java, String::class.java)
-            val process = newProcess.invoke(null, arrayOf("sh", "-c", cmd), null, null) as Process
-            return if (process.waitFor() == 0) "ok" else "error:command failed"
-        } catch (_: Exception) {
-            return "error:install Shizuku app for this feature"
-        }
+            val c = Class.forName("moe.shizuku.api.Shizuku")
+            val ping = c.getMethod("pingBinder")
+            if (ping.invoke(null) as? Boolean != true) return "error:install Shizuku"
+            val p = c.getMethod("newProcess", Array<String>::class.java, String::class.java, String::class.java)
+            val proc = p.invoke(null, arrayOf("sh", "-c", cmd), null, null) as Process
+            return if (proc.waitFor() == 0) "ok" else "error:cmd failed"
+        } catch (_: Exception) { return "error:install Shizuku" }
     }
 }
