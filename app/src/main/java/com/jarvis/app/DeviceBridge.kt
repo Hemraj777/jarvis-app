@@ -7,8 +7,9 @@ import android.media.AudioManager
 import android.net.wifi.WifiManager
 import android.provider.Settings
 import android.app.NotificationManager
+import android.content.pm.PackageManager
+import android.os.Build
 import android.util.Log
-import java.lang.reflect.Method
 
 class DeviceBridge(private val context: Context) {
 
@@ -23,7 +24,7 @@ class DeviceBridge(private val context: Context) {
     )
 
     @android.webkit.JavascriptInterface
-    fun execute(action: String): Boolean {
+    fun execute(action: String): String {
         return try {
             when {
                 action == "wifi_on" -> setWifi(true)
@@ -42,81 +43,90 @@ class DeviceBridge(private val context: Context) {
                 action == "brightness_auto_off" -> setBrightnessAuto(false)
                 action == "screenshot" -> shizukuRun("screencap -p /sdcard/Pictures/jarvis_screenshot.png")
                 action.startsWith("brightness_set:") -> {
-                    val v = action.substringAfter(":").toIntOrNull() ?: return false
-                    setBrightness(v)
+                    val v = action.substringAfter(":").toIntOrNull()
+                    if (v == null) "error:invalid brightness value"
+                    else setBrightness(v)
                 }
                 action.startsWith("open_") -> openApp(action.removePrefix("open_"))
-                else -> false
+                else -> "error:unknown action"
             }
+        } catch (e: SecurityException) {
+            Log.e("DeviceBridge", "permission denied", e)
+            "error:permission denied - ${e.message?.take(80)}"
         } catch (e: Exception) {
             Log.e("DeviceBridge", "execute error", e)
-            false
+            "error:${e.message?.take(80) ?: "unknown"}"
         }
     }
 
-    private fun setWifi(on: Boolean): Boolean {
+    private fun setWifi(on: Boolean): String {
         val wm = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-        return wm.setWifiEnabled(on)
+        return if (wm.setWifiEnabled(on)) "ok" else "error:failed to toggle WiFi"
     }
 
-    private fun setBluetooth(on: Boolean): Boolean {
-        val ba = BluetoothAdapter.getDefaultAdapter() ?: return false
-        return if (on) ba.enable() else ba.disable()
+    private fun setBluetooth(on: Boolean): String {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val hasPerm = context.checkSelfPermission(android.Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
+            if (!hasPerm) return "error:grant BLUETOOTH_CONNECT permission in Settings"
+        }
+        val ba = BluetoothAdapter.getDefaultAdapter()
+        if (ba == null) return "error:no Bluetooth hardware"
+        val ok = if (on) ba.enable() else ba.disable()
+        return if (ok) "ok" else "error:Bluetooth toggle failed"
     }
 
-    private fun adjustVolume(dir: Int): Boolean {
+    private fun adjustVolume(dir: Int): String {
         val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
         am.adjustStreamVolume(AudioManager.STREAM_MUSIC, dir, 0)
-        return true
+        return "ok"
     }
 
-    private fun setDnd(on: Boolean): Boolean {
+    private fun setDnd(on: Boolean): String {
         val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        if (!nm.isNotificationPolicyAccessGranted) return false
+        if (!nm.isNotificationPolicyAccessGranted) return "error:grant DND access in Settings"
         nm.setInterruptionFilter(
             if (on) NotificationManager.INTERRUPTION_FILTER_PRIORITY
             else NotificationManager.INTERRUPTION_FILTER_ALL
         )
-        return true
+        return "ok"
     }
 
-    private fun setBrightness(value: Int): Boolean {
+    private fun setBrightness(value: Int): String {
         val v = value.coerceIn(0, 255)
         Settings.System.putInt(context.contentResolver, Settings.System.SCREEN_BRIGHTNESS, v)
-        return true
+        return "ok"
     }
 
-    private fun setBrightnessAuto(on: Boolean): Boolean {
+    private fun setBrightnessAuto(on: Boolean): String {
         Settings.System.putInt(
             context.contentResolver,
             Settings.System.SCREEN_BRIGHTNESS_MODE,
             if (on) Settings.System.SCREEN_BRIGHTNESS_MODE_AUTOMATIC
             else Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL
         )
-        return true
+        return "ok"
     }
 
-    private fun openApp(name: String): Boolean {
-        val pkg = appPkg[name] ?: return false
-        val intent = context.packageManager.getLaunchIntentForPackage(pkg) ?: return false
+    private fun openApp(name: String): String {
+        val pkg = appPkg[name] ?: return "error:unknown app '$name'"
+        val intent = context.packageManager.getLaunchIntentForPackage(pkg)
+        if (intent == null) return "error:app '$name' not installed"
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         context.startActivity(intent)
-        return true
+        return "ok"
     }
 
-    private fun shizukuRun(cmd: String): Boolean {
+    private fun shizukuRun(cmd: String): String {
         try {
             val clz = Class.forName("moe.shizuku.api.Shizuku")
             val ping = clz.getMethod("pingBinder")
-            if (ping.invoke(null) as? Boolean != true) return false
-
+            if (ping.invoke(null) as? Boolean != true) return "error:install Shizuku for this feature"
             val newProcess = clz.getMethod("newProcess", Array<String>::class.java, String::class.java, String::class.java)
             val process = newProcess.invoke(null, arrayOf("sh", "-c", cmd), null, null) as Process
             val exit = process.waitFor()
-            return exit == 0
+            return if (exit == 0) "ok" else "error:command failed (exit $exit)"
         } catch (e: Exception) {
-            Log.w("DeviceBridge", "Shizuku not available", e)
-            return false
+            return "error:install Shizuku for this feature"
         }
     }
 }
