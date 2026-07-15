@@ -26,8 +26,14 @@ jobs:
       - name: Build APK
         run: gradle assembleRelease
 
+      - name: Find APK
+        run: |
+          echo "Looking for APK..."
+          find app/build -name "*.apk" 2>/dev/null || echo "No APK found"
+          ls -la app/build/outputs/apk/release/ 2>/dev/null || echo "No release dir"
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: jarvis-apk
-          path: app/build/outputs/apk/release/app-release.apk
+          path: app/build/outputs/apk/release/*.apk
